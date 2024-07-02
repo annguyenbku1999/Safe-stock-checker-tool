@@ -4,9 +4,8 @@ import pandas as pd
 import subprocess
 import json
 
-
 # Lấy các biến môi trường
-DAYCHECK = 1
+DAYCHECK = 0
 PERCENTAGE_HIGH_VOLUME = 1.5
 
 def get_previous_weekday(date):
@@ -56,12 +55,13 @@ def parse_data(data):
     df = pd.DataFrame({
         'timestamp': data['t'],
         'close': data['c'],
+        'high': data['h'],   # Thêm dòng này để lấy giá cao
+        'low': data['l'],    # Thêm dòng này để lấy giá thấp
         'volume': data['v']
     })
     df['date'] = pd.to_datetime(df['timestamp'], unit='s')
     df.set_index('date', inplace=True)
     return df
-
 
 def volumeHighChange(ticker):
     """Kiểm tra sự thay đổi lớn của khối lượng giao dịch giữa hai ngày"""
@@ -88,11 +88,54 @@ def volumeHighChange(ticker):
     volume_change_today = df_today['volume'].sum()
     volume_change_yesterday = df_yesterday['volume'].sum()
     return volume_change_today > PERCENTAGE_HIGH_VOLUME * volume_change_yesterday
+
 def percentage_change(df):
     """Tính phần trăm thay đổi của cột 'close' so với giá trị đầu tiên"""
     first_close = df.iloc[0]['close']
     df['percentage_change'] = (df['close'] - first_close) / first_close * 100
     return df
+
+def calculate_ichimoku(df):
+    """Tính toán Ichimoku bỏ qua các ngày thứ bảy và chủ nhật"""
+    business_days_df = df[df.index.weekday < 5]  # Chỉ giữ lại các ngày không phải là thứ bảy (5) và chủ nhật (6)
+
+    # Đường cơ sở (Kijun-sen) là trung bình của đỉnh và đáy trong 17 ngày làm việc
+    kijun_sen_period = 17
+    df['kijun_sen'] = (business_days_df['high'].rolling(window=kijun_sen_period, min_periods=1).max() + business_days_df['low'].rolling(window=kijun_sen_period, min_periods=1).min()) / 2
+
+    # Đường chuyển đổi (Tenkan-sen) là trung bình của đỉnh và đáy trong 10 ngày làm việc
+    tenkan_sen_period = 10
+    df['tenkan_sen'] = (business_days_df['high'].rolling(window=tenkan_sen_period, min_periods=1).max() + business_days_df['low'].rolling(window=tenkan_sen_period, min_periods=1).min()) / 2
+
+    return df
+
+def ichimoku_cross(ticker):
+    """Kiểm tra sự cắt nhau hoặc đường chuyển đổi nằm trên đường cơ sở của các đường Ichimoku"""
+    # Lấy dữ liệu trong vòng 30 ngày
+    start_date = dayEnd - timedelta(days=30)
+    start_timestamp = int(start_date.timestamp())
+
+    data = fetch_data_with_curl(ticker, start_timestamp, today_timestamp)
+    if data is None:
+        return False
+
+    df = parse_data(data)
+    if df is None:
+        return False
+
+    df = calculate_ichimoku(df)
+
+    print('Tenkan-sen:', df['tenkan_sen'].iloc[-1])
+    print('Kijun-sen:', df['kijun_sen'].iloc[-1])
+
+    # Điều kiện cắt nhau
+    cross = ((df['tenkan_sen'].iloc[-2] <= df['kijun_sen'].iloc[-2]) and (df['tenkan_sen'].iloc[-1] > df['kijun_sen'].iloc[-1])) or \
+            ((df['tenkan_sen'].iloc[-2] >= df['kijun_sen'].iloc[-2]) and (df['tenkan_sen'].iloc[-1] < df['kijun_sen'].iloc[-1]))
+
+    # Điều kiện đường chuyển đổi nằm trên đường cơ sở
+    above = df['tenkan_sen'].iloc[-1] > df['kijun_sen'].iloc[-1]
+
+    return cross or above
 
 def analyze_stock(ticker):
     print('-------------- Analyzing', ticker, '--------------')
@@ -115,8 +158,13 @@ def analyze_stock(ticker):
         meets_criteria_percentage = df.iloc[-1]['percentage_change'] > 1
 
         if meets_criteria_percentage:
-            print(f'{ticker} meets criteria.')
-            return True
+            # Kiểm tra Ichimoku cross
+            if ichimoku_cross(ticker):
+                print(f'{ticker} meets criteria and Ichimoku cross.')
+                return True
+            else:
+                print(f'{ticker} meets criteria but no Ichimoku cross.')
+                return False
         else:
             print(f'{ticker} does not meet criteria (percentage change < {PERCENTAGE_HIGH_VOLUME}%).')
             return False
